@@ -194,12 +194,7 @@
       { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun2.l.google.com:19302' },
       { urls: 'stun:stun3.l.google.com:19302' },
-      { urls: 'stun:stun4.l.google.com:19302' },
-      {
-        urls: 'turn:numb.viagenie.ca',
-        username: 'webrtc@live.com',
-        credential: 'muazkh'
-      }
+      { urls: 'stun:stun4.l.google.com:19302' }
     ]
   };
 
@@ -241,10 +236,28 @@
   function createPeerConnection(remoteId, isInitiator) {
     const pc = new RTCPeerConnection(RTC_CONFIG);
     peers[remoteId] = pc;
+    let hasOffered = false;
+    let isNegotiating = false;
 
-    if (localStream) {
-      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-    }
+    const sendOfferIfNeeded = async () => {
+      if (!isInitiator || hasOffered || isNegotiating || pc.signalingState !== 'stable') return;
+      isNegotiating = true;
+      try {
+        const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+        offer.sdp = clampSDPBandwidth(offer.sdp);
+        await pc.setLocalDescription(offer);
+        socket.emit('signal', { to: remoteId, data: { type: 'offer', sdp: pc.localDescription.sdp } });
+        hasOffered = true;
+      } catch (err) {
+        appendDebug(`Offer failed for ${remoteId}: ${err.message}`);
+      } finally {
+        isNegotiating = false;
+      }
+    };
+
+    pc.onnegotiationneeded = () => {
+      sendOfferIfNeeded();
+    };
 
     pc.onicecandidate = (e) => {
       if (e.candidate) {
@@ -268,29 +281,17 @@
 
     pc.oniceconnectionstatechange = () => {
       appendDebug(`ICE connection state for ${remoteId}: ${pc.iceConnectionState}`);
+      if ((pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') && isInitiator) {
+        pc.restartIce();
+        sendOfferIfNeeded();
+      }
     };
 
-    if (isInitiator) {
-      pc.onnegotiationneeded = async () => {
-        try {
-          const offer = await pc.createOffer();
-          offer.sdp = clampSDPBandwidth(offer.sdp);
-          await pc.setLocalDescription(offer);
-          socket.emit('signal', { to: remoteId, data: { type: 'offer', sdp: pc.localDescription.sdp } });
-        } catch (err) { console.error(err); }
-      };
-
-      // Manually trigger offer creation after a delay (onnegotiationneeded may not fire immediately)
-      setTimeout(async () => {
-        try {
-          const offer = await pc.createOffer();
-          offer.sdp = clampSDPBandwidth(offer.sdp);
-          await pc.setLocalDescription(offer);
-          socket.emit('signal', { to: remoteId, data: { type: 'offer', sdp: pc.localDescription.sdp } });
-        } catch (err) { console.error('Manual offer failed:', err); }
-      }, 100);
+    if (localStream) {
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
     }
 
+    sendOfferIfNeeded();
     return pc;
   }
 
