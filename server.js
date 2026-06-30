@@ -9,6 +9,10 @@ const io = new Server(server, { maxHttpBufferSize: 1e6 });
 
 app.use(express.static(path.join(__dirname, 'public')));
 
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 const rooms = {}; // roomId -> Set of socket ids
 
 io.on('connection', (socket) => {
