@@ -148,7 +148,12 @@
       { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun2.l.google.com:19302' },
       { urls: 'stun:stun3.l.google.com:19302' },
-      { urls: 'stun:stun4.l.google.com:19302' }
+      { urls: 'stun:stun4.l.google.com:19302' },
+      {
+        urls: 'turn:numb.viagenie.ca',
+        username: 'webrtc@live.com',
+        credential: 'muazkh'
+      }
     ]
   };
 
@@ -197,6 +202,7 @@
 
     pc.onicecandidate = (e) => {
       if (e.candidate) {
+        console.debug('ICE candidate for', remoteId, e.candidate);
         socket.emit('signal', { to: remoteId, data: { type: 'ice', candidate: e.candidate } });
       }
     };
@@ -206,10 +212,15 @@
     };
 
     pc.onconnectionstatechange = () => {
+      console.debug('Connection state for', remoteId, pc.connectionState);
       updateStat();
       if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
         removePeer(remoteId);
       }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      console.debug('ICE connection state for', remoteId, pc.iceConnectionState);
     };
 
     if (isInitiator) {
