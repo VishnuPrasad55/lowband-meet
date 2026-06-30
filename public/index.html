@@ -32,6 +32,12 @@
   #colorPicker{ width:30px; height:30px; border:none; border-radius:6px; cursor:pointer; padding:0; }
   #brushSize{ width:80px; }
 
+  #shareBar{ background:var(--panel); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; padding:8px 14px; flex-shrink:0; }
+  #shareBar span{ color:var(--muted); font-size:12px; }
+  #shareLink{ flex:1; min-width:0; background:#0d0f13; border:1px solid var(--border); color:var(--text); padding:6px 10px; border-radius:6px; font-size:12px; }
+  #copyLinkBtn{ padding:6px 10px; font-size:12px; }
+  #debugPanel{ margin-top:8px; background:#0b0d11; color:#a5b4fc; font-size:11px; border-top:1px solid var(--border); padding:10px 12px; line-height:1.4; height:96px; overflow:auto; white-space:pre-wrap; }
+
   #main{ flex:1; display:flex; overflow:hidden; }
   #whiteboardWrap{ flex:1; position:relative; background:#fff; display:flex; flex-direction:column; }
   #viewTabs{
@@ -89,6 +95,14 @@
   <span class="stat" id="statLine">Disconnected</span>
 </div>
 
+<div id="shareBar">
+  <div id="roomShare">
+    <span>Share this exact room link:</span>
+    <input id="shareLink" readonly>
+    <button id="copyLinkBtn" class="secondary">Copy</button>
+  </div>
+</div>
+
 <div id="main">
   <div id="whiteboardWrap">
     <div id="viewTabs">
@@ -110,6 +124,7 @@
     <div id="remoteContainer">
       <div class="empty">Waiting for peers to join…</div>
     </div>
+    <div id="debugPanel">Debug output will appear here.</div>
   </div>
 </div>
 
@@ -127,11 +142,33 @@
   const statLine = document.getElementById('statLine');
   const remoteContainer = document.getElementById('remoteContainer');
   const roomInput = document.getElementById('roomInput');
+  const shareLinkInput = document.getElementById('shareLink');
+  const copyLinkBtn = document.getElementById('copyLinkBtn');
+  const debugPanel = document.getElementById('debugPanel');
 
   const urlRoom = new URLSearchParams(window.location.search).get('room');
   if (urlRoom) {
     roomInput.value = urlRoom;
   }
+
+  function setShareLink(room) {
+    const link = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(room)}`;
+    shareLinkInput.value = link;
+    return link;
+  }
+
+  function appendDebug(message) {
+    const time = new Date().toLocaleTimeString();
+    debugPanel.textContent += `[${time}] ${message}\n`;
+    debugPanel.scrollTop = debugPanel.scrollHeight;
+  }
+
+  function updateShareLink() {
+    const room = roomInput.value.trim() || 'demo-room';
+    setShareLink(room);
+  }
+
+  updateShareLink();
 
   const MEDIA_CONSTRAINTS = {
     video: {
@@ -208,17 +245,18 @@
 
     pc.onicecandidate = (e) => {
       if (e.candidate) {
-        console.debug('ICE candidate for', remoteId, e.candidate);
+        appendDebug(`ICE candidate for ${remoteId}`);
         socket.emit('signal', { to: remoteId, data: { type: 'ice', candidate: e.candidate } });
       }
     };
 
     pc.ontrack = (e) => {
+      appendDebug(`Received remote stream from ${remoteId}`);
       addRemoteVideoTile(remoteId, e.streams[0]);
     };
 
     pc.onconnectionstatechange = () => {
-      console.debug('Connection state for', remoteId, pc.connectionState);
+      appendDebug(`Connection state for ${remoteId}: ${pc.connectionState}`);
       updateStat();
       if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
         removePeer(remoteId);
@@ -226,7 +264,7 @@
     };
 
     pc.oniceconnectionstatechange = () => {
-      console.debug('ICE connection state for', remoteId, pc.iceConnectionState);
+      appendDebug(`ICE connection state for ${remoteId}: ${pc.iceConnectionState}`);
     };
 
     if (isInitiator) {
@@ -306,24 +344,43 @@
   }
 
   socket.on('existing-peers', (ids) => {
+    appendDebug(`Existing peers in room: ${ids.join(', ') || 'none'}`);
     ids.forEach(id => createPeerConnection(id, true));
   });
   socket.on('new-peer', (id) => {
+    appendDebug(`New peer joined: ${id}`);
     if (!peers[id]) createPeerConnection(id, false);
   });
   socket.on('signal', handleSignal);
-  socket.on('peer-left', removePeer);
+  socket.on('peer-left', (id) => {
+    appendDebug(`Peer left: ${id}`);
+    removePeer(id);
+  });
 
   document.getElementById('joinBtn').addEventListener('click', async () => {
     const val = document.getElementById('roomInput').value.trim();
     if (!val) return alert('Enter a room ID');
     roomId = val;
+    updateShareLink();
+    appendDebug(`Joining room ${roomId}`);
     await initMedia();
     socket.emit('join-room', roomId);
     updateStat();
     document.getElementById('joinBtn').textContent = 'Joined';
     document.getElementById('joinBtn').disabled = true;
   });
+
+  copyLinkBtn.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(shareLinkInput.value);
+      appendDebug('Share link copied to clipboard');
+    } catch (err) {
+      appendDebug('Copy failed: ' + err.message);
+      alert('Copy failed: ' + err.message);
+    }
+  });
+
+  roomInput.addEventListener('input', updateShareLink);
 
   if (urlRoom) {
     document.getElementById('joinBtn').click();
