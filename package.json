@@ -1,0 +1,14 @@
+{
+  "name": "lowband-meet",
+  "version": "1.0.0",
+  "description": "Ultra-low-bandwidth video calling and whiteboard app",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "stop": "taskkill /IM node.exe /F"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}

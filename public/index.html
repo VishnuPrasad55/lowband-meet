@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LowBand Meet</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  :root{
+    --bg:#0f1115; --panel:#161a21; --accent:#3b82f6; --border:#262b35; --text:#e5e7eb; --muted:#8b93a3;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+    background:var(--bg); color:var(--text); height:100vh; overflow:hidden;
+    display:flex; flex-direction:column;
+  }
+  #topbar{
+    height:48px; background:var(--panel); border-bottom:1px solid var(--border);
+    display:flex; align-items:center; gap:10px; padding:0 14px; flex-shrink:0;
+  }
+  #topbar input{
+    background:#0d0f13; border:1px solid var(--border); color:var(--text);
+    padding:6px 10px; border-radius:6px; font-size:13px; width:140px;
+  }
+  #topbar button{
+    background:var(--accent); border:none; color:#fff; padding:7px 14px;
+    border-radius:6px; cursor:pointer; font-size:13px; font-weight:600;
+  }
+  #topbar button.secondary{ background:#2a2f3a; }
+  #topbar button.danger{ background:#dc2626; }
+  #topbar .stat{ font-size:11px; color:var(--muted); margin-left:auto; }
+  #colorPicker{ width:30px; height:30px; border:none; border-radius:6px; cursor:pointer; padding:0; }
+  #brushSize{ width:80px; }
+
+  #main{ flex:1; display:flex; overflow:hidden; }
+  #whiteboardWrap{ flex:1; position:relative; background:#fff; display:flex; flex-direction:column; }
+  #viewTabs{
+    flex-shrink:0; display:flex; gap:4px; background:#1c2027; padding:6px 8px; border-bottom:1px solid var(--border);
+  }
+  #viewTabs .tab{
+    background:#2a2f3a; color:var(--muted); border:none; padding:6px 12px; border-radius:5px;
+    font-size:12px; cursor:pointer; font-weight:600; display:flex; align-items:center; gap:6px;
+  }
+  #viewTabs .tab.active{ background:var(--accent); color:#fff; }
+  .dot{ width:7px; height:7px; border-radius:50%; background:#22c55e; }
+  #board{ width:100%; flex:1; display:block; cursor:crosshair; touch-action:none; }
+  #screenView{
+    flex:1; display:none; background:#0d0f13; position:relative; align-items:center; justify-content:center;
+  }
+  #screenView.active{ display:flex; }
+  #screenVideo{ max-width:100%; max-height:100%; display:none; }
+  #screenVideo.live{ display:block; }
+  #noScreen{ color:var(--muted); font-size:13px; }
+
+  #sidebar{
+    width:220px; background:var(--panel); border-left:1px solid var(--border);
+    display:flex; flex-direction:column; overflow-y:auto; flex-shrink:0;
+  }
+  .video-tile{
+    position:relative; width:100%; aspect-ratio:4/3; background:#000;
+    border-bottom:1px solid var(--border); flex-shrink:0;
+  }
+  .video-tile video{ width:100%; height:100%; object-fit:cover; display:block; }
+  .video-tile .label{
+    position:absolute; bottom:4px; left:6px; font-size:10px; background:rgba(0,0,0,.55);
+    padding:2px 6px; border-radius:4px; color:#fff;
+  }
+  .video-tile .bw{
+    position:absolute; top:4px; right:6px; font-size:9px; background:rgba(59,130,246,.85);
+    padding:2px 5px; border-radius:4px; color:#fff;
+  }
+  #sidebar .empty{ padding:14px; font-size:12px; color:var(--muted); text-align:center; }
+
+  ::-webkit-scrollbar{ width:6px; }
+  ::-webkit-scrollbar-thumb{ background:#2a2f3a; border-radius:3px; }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <input id="roomInput" placeholder="Room ID" value="demo-room">
+  <button id="joinBtn">Join</button>
+  <button id="micBtn" class="secondary">🎤 On</button>
+  <button id="camBtn" class="secondary">📷 On</button>
+  <button id="screenBtn" class="secondary">🖥️ Share Screen</button>
+  <input type="color" id="colorPicker" value="#000000" title="Pen color">
+  <input type="range" id="brushSize" min="1" max="20" value="3" title="Brush size">
+  <button id="clearBtn" class="secondary">Clear Board</button>
+  <span class="stat" id="statLine">Disconnected</span>
+</div>
+
+<div id="main">
+  <div id="whiteboardWrap">
+    <div id="viewTabs">
+      <button id="tabWhiteboard" class="tab active">Whiteboard</button>
+      <button id="tabScreen" class="tab">Screen Share <span id="screenDot" class="dot" style="display:none;"></span></button>
+    </div>
+    <canvas id="board"></canvas>
+    <div id="screenView">
+      <video id="screenVideo" autoplay playsinline></video>
+      <div id="noScreen">No one is sharing their screen yet.</div>
+    </div>
+  </div>
+  <div id="sidebar">
+    <div class="video-tile" id="localTile">
+      <video id="localVideo" autoplay playsinline muted></video>
+      <div class="label">You</div>
+      <div class="bw">320x240 @10fps</div>
+    </div>
+    <div id="remoteContainer">
+      <div class="empty">Waiting for peers to join…</div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+(function(){
+  'use strict';
+
+  const socket = io();
+  let roomId = null;
+  let localStream = null;
+  const peers = {};
+  const remoteEls = {};
+
+  const statLine = document.getElementById('statLine');
+  const remoteContainer = document.getElementById('remoteContainer');
+
+  const MEDIA_CONSTRAINTS = {
+    video: {
+      width: { ideal: 320, max: 320 },
+      height: { ideal: 240, max: 240 },
+      frameRate: { ideal: 10, max: 10 }
+    },
+    audio: {
+      sampleRate: 16000,
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    }
+  };
+
+  const RTC_CONFIG = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' }
+    ]
+  };
+
+  function clampSDPBandwidth(sdp) {
+    let lines = sdp.split('\r\n');
+    let output = [];
+    let inVideo = false, inAudio = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      output.push(line);
+      if (line.startsWith('m=video')) { inVideo = true; inAudio = false; }
+      else if (line.startsWith('m=audio')) { inAudio = true; inVideo = false; }
+      else if (line.startsWith('m=')) { inVideo = false; inAudio = false; }
+
+      if (line.startsWith('c=IN') && inVideo) {
+        output.push('b=AS:100');
+        output.push('b=TIAS:100000');
+        inVideo = false;
+      }
+      if (line.startsWith('c=IN') && inAudio) {
+        output.push('b=AS:24');
+        inAudio = false;
+      }
+    }
+    return output.join('\r\n');
+  }
+
+  async function initMedia() {
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia(MEDIA_CONSTRAINTS);
+      document.getElementById('localVideo').srcObject = localStream;
+    } catch (err) {
+      console.error('getUserMedia failed', err);
+      alert('Camera/Mic access failed: ' + err.message);
+      localStream = new MediaStream();
+    }
+  }
+
+  function createPeerConnection(remoteId, isInitiator) {
+    const pc = new RTCPeerConnection(RTC_CONFIG);
+    peers[remoteId] = pc;
+
+    if (localStream) {
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+    }
+
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        socket.emit('signal', { to: remoteId, data: { type: 'ice', candidate: e.candidate } });
+      }
+    };
+
+    pc.ontrack = (e) => {
+      addRemoteVideoTile(remoteId, e.streams[0]);
+    };
+
+    pc.onconnectionstatechange = () => {
+      updateStat();
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        removePeer(remoteId);
+      }
+    };
+
+    if (isInitiator) {
+      pc.onnegotiationneeded = async () => {
+        try {
+          const offer = await pc.createOffer();
+          offer.sdp = clampSDPBandwidth(offer.sdp);
+          await pc.setLocalDescription(offer);
+          socket.emit('signal', { to: remoteId, data: { type: 'offer', sdp: pc.localDescription.sdp } });
+        } catch (err) { console.error(err); }
+      };
+
+      // Manually trigger offer creation after a delay (onnegotiationneeded may not fire immediately)
+      setTimeout(async () => {
+        try {
+          const offer = await pc.createOffer();
+          offer.sdp = clampSDPBandwidth(offer.sdp);
+          await pc.setLocalDescription(offer);
+          socket.emit('signal', { to: remoteId, data: { type: 'offer', sdp: pc.localDescription.sdp } });
+        } catch (err) { console.error('Manual offer failed:', err); }
+      }, 100);
+    }
+
+    return pc;
+  }
+
+  async function handleSignal({ from, data }) {
+    let pc = peers[from];
+    if (!pc) pc = createPeerConnection(from, false);
+
+    if (data.type === 'offer') {
+      await pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
+      const answer = await pc.createAnswer();
+      answer.sdp = clampSDPBandwidth(answer.sdp);
+      await pc.setLocalDescription(answer);
+      socket.emit('signal', { to: from, data: { type: 'answer', sdp: pc.localDescription.sdp } });
+    } else if (data.type === 'answer') {
+      await pc.setRemoteDescription({ type: 'answer', sdp: data.sdp });
+    } else if (data.type === 'ice') {
+      try { await pc.addIceCandidate(data.candidate); } catch (e) { console.warn(e); }
+    }
+  }
+
+  function addRemoteVideoTile(id, stream) {
+    if (remoteEls[id]) { remoteEls[id].srcObject = stream; return; }
+    const emptyMsg = remoteContainer.querySelector('.empty');
+    if (emptyMsg) emptyMsg.remove();
+
+    const tile = document.createElement('div');
+    tile.className = 'video-tile';
+    tile.id = 'tile-' + id;
+    tile.innerHTML = `
+      <video autoplay playsinline></video>
+      <div class="label">Peer ${id.slice(0,5)}</div>
+      <div class="bw">100kbps cap</div>
+    `;
+    const video = tile.querySelector('video');
+    video.srcObject = stream;
+    remoteContainer.appendChild(tile);
+    remoteEls[id] = video;
+  }
+
+  function removePeer(id) {
+    if (peers[id]) { peers[id].close(); delete peers[id]; }
+    const tile = document.getElementById('tile-' + id);
+    if (tile) tile.remove();
+    delete remoteEls[id];
+    if (Object.keys(remoteEls).length === 0) {
+      remoteContainer.innerHTML = '<div class="empty">Waiting for peers to join…</div>';
+    }
+    updateStat();
+  }
+
+  function updateStat() {
+    const count = Object.keys(peers).length;
+    statLine.textContent = `Room: ${roomId || '-'} | Peers: ${count}`;
+  }
+
+  socket.on('existing-peers', (ids) => {
+    ids.forEach(id => createPeerConnection(id, true));
+  });
+  socket.on('new-peer', (id) => {
+    if (!peers[id]) createPeerConnection(id, false);
+  });
+  socket.on('signal', handleSignal);
+  socket.on('peer-left', removePeer);
+
+  document.getElementById('joinBtn').addEventListener('click', async () => {
+    const val = document.getElementById('roomInput').value.trim();
+    if (!val) return alert('Enter a room ID');
+    roomId = val;
+    await initMedia();
+    socket.emit('join-room', roomId);
+    updateStat();
+    document.getElementById('joinBtn').textContent = 'Joined';
+    document.getElementById('joinBtn').disabled = true;
+  });
+
+  document.getElementById('micBtn').addEventListener('click', function(){
+    if (!localStream) return;
+    const track = localStream.getAudioTracks()[0];
+    if (!track) return;
+    track.enabled = !track.enabled;
+    this.textContent = track.enabled ? '🎤 On' : '🎤 Off';
+  });
+  document.getElementById('camBtn').addEventListener('click', function(){
+    if (!localStream) return;
+    const track = localStream.getVideoTracks()[0];
+    if (!track) return;
+    track.enabled = !track.enabled;
+    this.textContent = track.enabled ? '📷 On' : '📷 Off';
+  });
+
+  // ---------- TAB SWITCHING (Whiteboard / Screen Share) ----------
+  const tabWhiteboard = document.getElementById('tabWhiteboard');
+  const tabScreen = document.getElementById('tabScreen');
+  const screenView = document.getElementById('screenView');
+  const boardCanvas = document.getElementById('board');
+
+  function showWhiteboard() {
+    tabWhiteboard.classList.add('active');
+    tabScreen.classList.remove('active');
+    screenView.classList.remove('active');
+    boardCanvas.style.display = 'block';
+  }
+  function showScreen() {
+    tabScreen.classList.add('active');
+    tabWhiteboard.classList.remove('active');
+    screenView.classList.add('active');
+    boardCanvas.style.display = 'none';
+  }
+  tabWhiteboard.addEventListener('click', showWhiteboard);
+  tabScreen.addEventListener('click', showScreen);
+
+  // ---------- SCREEN SHARE (real getDisplayMedia, low-bitrate clamped) ----------
+  const screenBtn = document.getElementById('screenBtn');
+  const screenVideo = document.getElementById('screenVideo');
+  const screenDot = document.getElementById('screenDot');
+  const noScreen = document.getElementById('noScreen');
+  let screenStream = null;
+  let sharingScreen = false;
+
+  const SCREEN_CONSTRAINTS = {
+    video: {
+      width: { ideal: 960, max: 1280 },
+      height: { ideal: 540, max: 720 },
+      frameRate: { ideal: 5, max: 8 }
+    },
+    audio: false
+  };
+
+  async function startScreenShare() {
+    try {
+      screenStream = await navigator.mediaDevices.getDisplayMedia(SCREEN_CONSTRAINTS);
+    } catch (err) {
+      console.warn('Screen share cancelled or failed', err);
+      return;
+    }
+    const screenTrack = screenStream.getVideoTracks()[0];
+    sharingScreen = true;
+    screenBtn.textContent = '🖥️ Stop Sharing';
+    screenBtn.classList.add('danger');
+
+    // Replace outgoing video track on every existing peer connection
+    Object.values(peers).forEach(pc => {
+      const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+      if (sender) sender.replaceTrack(screenTrack);
+    });
+
+    // Show it locally too, in the Screen Share tab
+    screenVideo.srcObject = screenStream;
+    screenVideo.classList.add('live');
+    noScreen.style.display = 'none';
+    showScreen();
+    socket.emit('screen-share-started');
+
+    // If the user stops sharing via the browser's native "Stop sharing" control
+    screenTrack.onended = () => stopScreenShare();
+  }
+
+  function stopScreenShare() {
+    if (!sharingScreen) return;
+    sharingScreen = false;
+    screenBtn.textContent = '🖥️ Share Screen';
+    screenBtn.classList.remove('danger');
+
+    // Revert every peer connection back to the camera track
+    const camTrack = localStream ? localStream.getVideoTracks()[0] : null;
+    Object.values(peers).forEach(pc => {
+      const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+      if (sender && camTrack) sender.replaceTrack(camTrack);
+    });
+
+    if (screenStream) {
+      screenStream.getTracks().forEach(t => t.stop());
+      screenStream = null;
+    }
+    screenVideo.srcObject = null;
+    screenVideo.classList.remove('live');
+    noScreen.style.display = 'block';
+    socket.emit('screen-share-stopped');
+  }
+
+  screenBtn.addEventListener('click', () => {
+    if (sharingScreen) stopScreenShare();
+    else startScreenShare();
+  });
+
+  // When a NEW peer joins while we are already sharing, give them the screen track too
+  socket.on('new-peer', (id) => {
+    if (sharingScreen && peers[id] && screenStream) {
+      const sender = peers[id].getSenders().find(s => s.track && s.track.kind === 'video');
+      if (sender) sender.replaceTrack(screenStream.getVideoTracks()[0]);
+    }
+  });
+
+  // Receiving a peer's screen share: ontrack already fires for the replaced track,
+  // but since it lands in the same video element as their camera, route by track label
+  // We detect "switch to screen" by listening for an explicit signal so viewers auto-tab over.
+  socket.on('peer-screen-share-started', (peerId) => {
+    screenDot.style.display = 'inline-block';
+    const remoteVideo = remoteEls[peerId];
+    if (remoteVideo && remoteVideo.srcObject) {
+      screenVideo.srcObject = remoteVideo.srcObject;
+      screenVideo.classList.add('live');
+      noScreen.style.display = 'none';
+      showScreen();
+    }
+  });
+  socket.on('peer-screen-share-stopped', (peerId) => {
+    screenDot.style.display = 'none';
+    screenVideo.classList.remove('live');
+    screenVideo.srcObject = null;
+    noScreen.style.display = 'block';
+  });
+
+  const canvas = document.getElementById('board');
+  const ctx = canvas.getContext('2d');
+  let drawing = false;
+  let lastX = 0, lastY = 0;
+  let currentColor = document.getElementById('colorPicker').value;
+  let currentSize = parseInt(document.getElementById('brushSize').value, 10);
+
+  function resizeCanvas() {
+    const imgData = canvas.width > 0 ? ctx.getImageData(0,0,canvas.width,canvas.height) : null;
+    canvas.width = canvas.clientWidth;
+    canvas.height = canvas.clientHeight;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+    if (imgData) ctx.putImageData(imgData, 0, 0);
+  }
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
+
+  document.getElementById('colorPicker').addEventListener('input', e => currentColor = e.target.value);
+  document.getElementById('brushSize').addEventListener('input', e => currentSize = parseInt(e.target.value,10));
+
+  function getPos(e) {
+    const rect = canvas.getBoundingClientRect();
+    if (e.touches && e.touches.length) {
+      return { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
+    }
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+
+  function drawLine(px, py, x, y, color, size) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = size;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+  }
+
+  function startDraw(e) {
+    e.preventDefault();
+    drawing = true;
+    const p = getPos(e);
+    lastX = p.x; lastY = p.y;
+  }
+  function moveDraw(e) {
+    if (!drawing) return;
+    e.preventDefault();
+    const p = getPos(e);
+    drawLine(lastX, lastY, p.x, p.y, currentColor, currentSize);
+
+    socket.emit('draw', {
+      px: lastX / canvas.width,
+      py: lastY / canvas.height,
+      x: p.x / canvas.width,
+      y: p.y / canvas.height,
+      color: currentColor,
+      size: currentSize
+    });
+
+    lastX = p.x; lastY = p.y;
+  }
+  function endDraw(e) { drawing = false; }
+
+  canvas.addEventListener('mousedown', startDraw);
+  canvas.addEventListener('mousemove', moveDraw);
+  canvas.addEventListener('mouseup', endDraw);
+  canvas.addEventListener('mouseleave', endDraw);
+  canvas.addEventListener('touchstart', startDraw, { passive:false });
+  canvas.addEventListener('touchmove', moveDraw, { passive:false });
+  canvas.addEventListener('touchend', endDraw);
+
+  socket.on('draw', (data) => {
+    drawLine(
+      data.px * canvas.width, data.py * canvas.height,
+      data.x * canvas.width, data.y * canvas.height,
+      data.color, data.size
+    );
+  });
+
+  document.getElementById('clearBtn').addEventListener('click', () => {
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+    socket.emit('clear-board');
+  });
+  socket.on('clear-board', () => {
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+  });
+
+})();
+</script>
+</body>
+</html>
