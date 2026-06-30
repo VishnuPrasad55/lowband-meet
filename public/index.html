@@ -139,6 +139,9 @@
   const peers = {};
   const remoteEls = {};
 
+  socket.on('connect', () => appendDebug('Socket connected'));
+  socket.on('disconnect', () => appendDebug('Socket disconnected'));
+
   const statLine = document.getElementById('statLine');
   const remoteContainer = document.getElementById('remoteContainer');
   const roomInput = document.getElementById('roomInput');
@@ -317,7 +320,7 @@
     tile.className = 'video-tile';
     tile.id = 'tile-' + id;
     tile.innerHTML = `
-      <video autoplay playsinline></video>
+      <video autoplay playsinline muted></video>
       <div class="label">Peer ${id.slice(0,5)}</div>
       <div class="bw">100kbps cap</div>
     `;
