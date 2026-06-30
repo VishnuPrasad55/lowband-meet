@@ -209,7 +209,8 @@
     ],
     iceTransportPolicy: 'all',
     bundlePolicy: 'max-bundle',
-    rtcpMuxPolicy: 'require'
+    rtcpMuxPolicy: 'require',
+    sdpSemantics: 'unified-plan'
   };
 
   function clampSDPBandwidth(sdp) {
@@ -247,17 +248,37 @@
     }
   }
 
+  function ensureLocalTracksForPeer(pc) {
+    if (!localStream) return;
+    const existingSenders = pc.getSenders();
+    localStream.getTracks().forEach(track => {
+      const sender = existingSenders.find(s => s.track && s.track.kind === track.kind);
+      if (sender) {
+        if (sender.track?.id !== track.id) {
+          sender.replaceTrack(track).catch(err => appendDebug(`Track replace failed for ${pc.peerId || 'peer'}: ${err.message}`));
+        }
+        return;
+      }
+      pc.addTrack(track, localStream);
+    });
+  }
+
   function createPeerConnection(remoteId, isInitiator) {
     const pc = new RTCPeerConnection(RTC_CONFIG);
+    pc.peerId = remoteId;
     peers[remoteId] = pc;
     let hasOffered = false;
     let isNegotiating = false;
     let reconnectAttempts = 0;
+    let recoveryScheduled = false;
 
-    const sendOfferIfNeeded = async () => {
-      if (!isInitiator || hasOffered || isNegotiating || pc.signalingState !== 'stable') return;
+    const sendOfferIfNeeded = async (force = false) => {
+      if (pc.signalingState !== 'stable' || isNegotiating) return;
+      const shouldSend = force || (isInitiator && !hasOffered);
+      if (!shouldSend) return;
       isNegotiating = true;
       try {
+        ensureLocalTracksForPeer(pc);
         const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
         offer.sdp = clampSDPBandwidth(offer.sdp);
         await pc.setLocalDescription(offer);
@@ -268,6 +289,18 @@
       } finally {
         isNegotiating = false;
       }
+    };
+
+    const scheduleRecover = (reason) => {
+      if (recoveryScheduled || reconnectAttempts >= 2) return;
+      recoveryScheduled = true;
+      reconnectAttempts += 1;
+      appendDebug(`Recovering ${remoteId} (${reason}, attempt ${reconnectAttempts})`);
+      setTimeout(() => {
+        recoveryScheduled = false;
+        pc.restartIce();
+        sendOfferIfNeeded(true).catch(err => appendDebug(`Recovery offer failed for ${remoteId}: ${err.message}`));
+      }, 1200);
     };
 
     pc.onnegotiationneeded = () => {
@@ -291,37 +324,21 @@
       updateStat();
       if (pc.connectionState === 'connected') {
         reconnectAttempts = 0;
+        recoveryScheduled = false;
       }
       if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        if (reconnectAttempts < 2) {
-          reconnectAttempts += 1;
-          appendDebug(`Trying to recover ${remoteId} (${reconnectAttempts})`);
-          setTimeout(() => {
-            pc.restartIce();
-            sendOfferIfNeeded();
-          }, 1000);
-        } else {
-          removePeer(remoteId);
-        }
+        scheduleRecover(pc.connectionState);
       }
     };
 
     pc.oniceconnectionstatechange = () => {
       appendDebug(`ICE connection state for ${remoteId}: ${pc.iceConnectionState}`);
-      if ((pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') && reconnectAttempts < 2) {
-        reconnectAttempts += 1;
-        appendDebug(`Reconnecting ${remoteId} (${reconnectAttempts})`);
-        setTimeout(() => {
-          pc.restartIce();
-          sendOfferIfNeeded();
-        }, 1000);
+      if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+        scheduleRecover(pc.iceConnectionState);
       }
     };
 
-    if (localStream) {
-      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-    }
-
+    ensureLocalTracksForPeer(pc);
     sendOfferIfNeeded();
     return pc;
   }
@@ -331,6 +348,7 @@
     if (!pc) pc = createPeerConnection(from, false);
 
     if (data.type === 'offer') {
+      ensureLocalTracksForPeer(pc);
       await pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
       const answer = await pc.createAnswer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
       answer.sdp = clampSDPBandwidth(answer.sdp);
