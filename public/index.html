@@ -138,6 +138,7 @@
   let localStream = null;
   const peers = {};
   const remoteEls = {};
+  const remoteStreams = {};
 
   socket.on('connect', () => appendDebug('Socket connected'));
   socket.on('disconnect', () => appendDebug('Socket disconnected'));
@@ -195,7 +196,10 @@
       { urls: 'stun:stun2.l.google.com:19302' },
       { urls: 'stun:stun3.l.google.com:19302' },
       { urls: 'stun:stun4.l.google.com:19302' }
-    ]
+    ],
+    iceTransportPolicy: 'all',
+    bundlePolicy: 'max-bundle',
+    rtcpMuxPolicy: 'require'
   };
 
   function clampSDPBandwidth(sdp) {
@@ -238,6 +242,7 @@
     peers[remoteId] = pc;
     let hasOffered = false;
     let isNegotiating = false;
+    let reconnectAttempts = 0;
 
     const sendOfferIfNeeded = async () => {
       if (!isInitiator || hasOffered || isNegotiating || pc.signalingState !== 'stable') return;
@@ -274,16 +279,32 @@
     pc.onconnectionstatechange = () => {
       appendDebug(`Connection state for ${remoteId}: ${pc.connectionState}`);
       updateStat();
+      if (pc.connectionState === 'connected') {
+        reconnectAttempts = 0;
+      }
       if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        removePeer(remoteId);
+        if (reconnectAttempts < 2) {
+          reconnectAttempts += 1;
+          appendDebug(`Trying to recover ${remoteId} (${reconnectAttempts})`);
+          setTimeout(() => {
+            pc.restartIce();
+            sendOfferIfNeeded();
+          }, 1000);
+        } else {
+          removePeer(remoteId);
+        }
       }
     };
 
     pc.oniceconnectionstatechange = () => {
       appendDebug(`ICE connection state for ${remoteId}: ${pc.iceConnectionState}`);
-      if ((pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') && isInitiator) {
-        pc.restartIce();
-        sendOfferIfNeeded();
+      if ((pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') && reconnectAttempts < 2) {
+        reconnectAttempts += 1;
+        appendDebug(`Reconnecting ${remoteId} (${reconnectAttempts})`);
+        setTimeout(() => {
+          pc.restartIce();
+          sendOfferIfNeeded();
+        }, 1000);
       }
     };
 
@@ -313,7 +334,23 @@
   }
 
   function addRemoteVideoTile(id, stream) {
-    if (remoteEls[id]) { remoteEls[id].srcObject = stream; return; }
+    if (!remoteStreams[id]) {
+      remoteStreams[id] = new MediaStream();
+    }
+
+    const mergedStream = remoteStreams[id];
+    stream.getTracks().forEach(track => {
+      if (!mergedStream.getTracks().some(existing => existing.id === track.id)) {
+        mergedStream.addTrack(track);
+      }
+    });
+
+    if (remoteEls[id]) {
+      remoteEls[id].srcObject = mergedStream;
+      remoteEls[id].play().catch(err => appendDebug('Remote video play blocked: ' + err.message));
+      return;
+    }
+
     const emptyMsg = remoteContainer.querySelector('.empty');
     if (emptyMsg) emptyMsg.remove();
 
@@ -326,7 +363,7 @@
       <div class="bw">100kbps cap</div>
     `;
     const video = tile.querySelector('video');
-    video.srcObject = stream;
+    video.srcObject = mergedStream;
     video.muted = false;
     video.play().catch(err => appendDebug('Remote video play blocked: ' + err.message));
     remoteContainer.appendChild(tile);
@@ -338,6 +375,7 @@
     const tile = document.getElementById('tile-' + id);
     if (tile) tile.remove();
     delete remoteEls[id];
+    delete remoteStreams[id];
     if (Object.keys(remoteEls).length === 0) {
       remoteContainer.innerHTML = '<div class="empty">Waiting for peers to join…</div>';
     }
