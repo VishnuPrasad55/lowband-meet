@@ -320,12 +320,14 @@
     tile.className = 'video-tile';
     tile.id = 'tile-' + id;
     tile.innerHTML = `
-      <video autoplay playsinline muted></video>
+      <video autoplay playsinline></video>
       <div class="label">Peer ${id.slice(0,5)}</div>
       <div class="bw">100kbps cap</div>
     `;
     const video = tile.querySelector('video');
     video.srcObject = stream;
+    video.muted = false;
+    video.play().catch(err => appendDebug('Remote video play blocked: ' + err.message));
     remoteContainer.appendChild(tile);
     remoteEls[id] = video;
   }
