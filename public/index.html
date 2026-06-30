@@ -126,6 +126,12 @@
 
   const statLine = document.getElementById('statLine');
   const remoteContainer = document.getElementById('remoteContainer');
+  const roomInput = document.getElementById('roomInput');
+
+  const urlRoom = new URLSearchParams(window.location.search).get('room');
+  if (urlRoom) {
+    roomInput.value = urlRoom;
+  }
 
   const MEDIA_CONSTRAINTS = {
     video: {
@@ -318,6 +324,10 @@
     document.getElementById('joinBtn').textContent = 'Joined';
     document.getElementById('joinBtn').disabled = true;
   });
+
+  if (urlRoom) {
+    document.getElementById('joinBtn').click();
+  }
 
   document.getElementById('micBtn').addEventListener('click', function(){
     if (!localStream) return;
