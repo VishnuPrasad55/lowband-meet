@@ -180,13 +180,7 @@
       height: { ideal: 240, max: 240 },
       frameRate: { ideal: 10, max: 10 }
     },
-    audio: {
-      sampleRate: 16000,
-      channelCount: 1,
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true
-    }
+    audio: true
   };
 
   const RTC_CONFIG = {
@@ -241,6 +235,11 @@
     try {
       localStream = await navigator.mediaDevices.getUserMedia(MEDIA_CONSTRAINTS);
       document.getElementById('localVideo').srcObject = localStream;
+      appendDebug(`Local stream tracks: ${localStream.getTracks().map(t => `${t.kind}:${t.id}`).join(', ')}`);
+      appendDebug(`Local audio track present: ${localStream.getAudioTracks().length > 0}`);
+      appendDebug(`Local video track present: ${localStream.getVideoTracks().length > 0}`);
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      appendDebug(`Available devices: ${devices.map(d => `${d.kind}:${d.label || 'hidden'}:${d.deviceId}`).join(', ')}`);
     } catch (err) {
       console.error('getUserMedia failed', err);
       alert('Camera/Mic access failed: ' + err.message);
@@ -261,6 +260,7 @@
       }
       pc.addTrack(track, localStream);
     });
+    appendDebug(`Peer ${pc.peerId}: senders=${pc.getSenders().map(s => `${s.track?.kind || 'none'}:${s.track?.id || 'no-track'}`).join(', ')}`);
   }
 
   function createPeerConnection(remoteId, isInitiator) {
@@ -315,8 +315,10 @@
     };
 
     pc.ontrack = (e) => {
-      appendDebug(`Received remote stream from ${remoteId}`);
-      addRemoteVideoTile(remoteId, e.streams[0]);
+      appendDebug(`Received remote track from ${remoteId}: ${e.track.kind}`);
+      appendDebug(`Remote stream tracks: ${e.streams[0] ? e.streams[0].getTracks().map(t => t.kind).join(', ') : 'none'}`);
+      const stream = e.streams[0] || new MediaStream([e.track]);
+      addRemoteMediaTile(remoteId, stream);
     };
 
     pc.onconnectionstatechange = () => {
@@ -350,35 +352,28 @@
     if (data.type === 'offer') {
       ensureLocalTracksForPeer(pc);
       await pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
+      appendDebug(`Remote description set for offer from ${from}. Transceivers: ${pc.getTransceivers().map(t => `${t.mid}:${t.receiver.track?.kind || 'none'}`).join(', ')}`);
+      appendDebug(`Peer ${pc.peerId} senders before answer: ${pc.getSenders().map(s => `${s.track?.kind || 'none'}`).join(', ')}`);
       const answer = await pc.createAnswer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
       answer.sdp = clampSDPBandwidth(answer.sdp);
       await pc.setLocalDescription(answer);
       socket.emit('signal', { to: from, data: { type: 'answer', sdp: pc.localDescription.sdp } });
     } else if (data.type === 'answer') {
       await pc.setRemoteDescription({ type: 'answer', sdp: data.sdp });
+      appendDebug(`Remote answer applied for ${from}. Transceivers: ${pc.getTransceivers().map(t => `${t.mid}:${t.receiver.track?.kind || 'none'}`).join(', ')}`);
+      appendDebug(`Peer ${pc.peerId} senders after answer: ${pc.getSenders().map(s => `${s.track?.kind || 'none'}`).join(', ')}`);
     } else if (data.type === 'ice') {
       try { await pc.addIceCandidate(data.candidate); } catch (e) { console.warn(e); }
     }
   }
 
-  function addRemoteVideoTile(id, stream) {
-    if (!remoteStreams[id]) {
-      remoteStreams[id] = new MediaStream();
-    }
-
-    const mergedStream = remoteStreams[id];
-    let addedTrack = false;
-    stream.getTracks().forEach(track => {
-      if (!mergedStream.getTracks().some(existing => existing.id === track.id)) {
-        mergedStream.addTrack(track);
-        addedTrack = true;
-      }
-    });
+  function addRemoteMediaTile(id, stream) {
+    const remoteStream = stream instanceof MediaStream ? stream : new MediaStream([stream]);
+    appendDebug(`Remote stream for ${id} contains ${remoteStream.getTracks().map(t => `${t.kind}:${t.id}`).join(', ')}`);
 
     if (remoteEls[id]) {
-      if (addedTrack) {
-        remoteEls[id].srcObject = mergedStream;
-      }
+      remoteEls[id].srcObject = remoteStream;
+      remoteEls[id].play().catch(err => appendDebug('Remote video play blocked: ' + err.message));
       return;
     }
 
@@ -394,7 +389,7 @@
       <div class="bw">100kbps cap</div>
     `;
     const video = tile.querySelector('video');
-    video.srcObject = mergedStream;
+    video.srcObject = remoteStream;
     video.muted = false;
     video.volume = 1;
     video.autoplay = true;
@@ -404,6 +399,8 @@
     };
     remoteContainer.appendChild(tile);
     remoteEls[id] = video;
+
+    video.play().catch(err => appendDebug('Remote video play blocked: ' + err.message));
   }
 
   function removePeer(id) {
@@ -436,6 +433,16 @@
     appendDebug(`Peer left: ${id}`);
     removePeer(id);
   });
+
+  function resumeRemoteMedia() {
+    Object.values(remoteEls).forEach(video => {
+      if (!video) return;
+      video.play().catch(err => appendDebug('Resume remote media failed: ' + err.message));
+    });
+  }
+
+  document.addEventListener('click', resumeRemoteMedia, { once: true });
+  document.addEventListener('keydown', resumeRemoteMedia, { once: true });
 
   document.getElementById('joinBtn').addEventListener('click', async () => {
     const val = document.getElementById('roomInput').value.trim();
