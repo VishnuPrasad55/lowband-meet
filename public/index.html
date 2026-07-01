@@ -367,15 +367,18 @@
     }
 
     const mergedStream = remoteStreams[id];
+    let addedTrack = false;
     stream.getTracks().forEach(track => {
       if (!mergedStream.getTracks().some(existing => existing.id === track.id)) {
         mergedStream.addTrack(track);
+        addedTrack = true;
       }
     });
 
     if (remoteEls[id]) {
-      remoteEls[id].srcObject = mergedStream;
-      remoteEls[id].play().catch(err => appendDebug('Remote video play blocked: ' + err.message));
+      if (addedTrack) {
+        remoteEls[id].srcObject = mergedStream;
+      }
       return;
     }
 
@@ -393,7 +396,12 @@
     const video = tile.querySelector('video');
     video.srcObject = mergedStream;
     video.muted = false;
-    video.play().catch(err => appendDebug('Remote video play blocked: ' + err.message));
+    video.volume = 1;
+    video.autoplay = true;
+    video.playsInline = true;
+    video.onloadedmetadata = () => {
+      video.play().catch(err => appendDebug('Remote video play blocked: ' + err.message));
+    };
     remoteContainer.appendChild(tile);
     remoteEls[id] = video;
   }
